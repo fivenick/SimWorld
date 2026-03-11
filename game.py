@@ -25,6 +25,20 @@ NPC_NAMES         = ['小明', '小红', '小刚', '小丽', '小华', '小芳',
 CHAT_STRANGER     = ['你好！', '嗨～', '初次见面', '你也在这里？']
 CHAT_ACQUAINTANCE = ['今天天气不错', '饿了吗？', '最近怎么样？', '一起走走？']
 CHAT_FRIEND       = ['好久不见！', '我就知道是你', '又见面了～', '想你了！', '咱们去找吃的？']
+CHAT_PHONE        = ['在干嘛～', '想你了', '出来玩？', '刚吃完饭', '你在哪呢',
+                     '哈哈哈哈', '好的好的', '等我一下', '今天好无聊', '发你个表情包']
+CHAT_CONFLICT     = ['哼！', '你什么意思！', '烦死了']
+
+FRIEND_THRESHOLD       = 10
+ACQUAINTANCE_THRESHOLD = 3
+DECAY_INTERVAL         = 1800   # ticks (~1 in-game day)
+DECAY_AMOUNT           = 1      # points lost per interval
+CONFLICT_PROB          = 0.0003 # per-frame per-NPC probability
+CONFLICT_DAMAGE_MIN    = 2
+CONFLICT_DAMAGE_MAX    = 5
+PHONE_COOLDOWN_MIN     = 600
+PHONE_COOLDOWN_MAX     = 1200
+PHONE_ICON_W, PHONE_ICON_H = 8, 12
 
 screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 pygame.display.set_caption("虚拟世界模拟 - SimWorld v0.1")
@@ -103,6 +117,10 @@ class NPC:
         self.bubble_timer = 0
         self.name = NPC_NAMES[npc_id % len(NPC_NAMES)]
         self.relationships = {}  # {other_npc_id: int} — chat count
+        self.phone_contacts      = set()   # set of NPC ids
+        self.last_chat_tick      = {}      # {other_npc_id: int}
+        self.is_phone_chat       = False   # True while current bubble is a phone chat
+        self.phone_chat_cooldown = 0
 
     def _nearest_item(self, items, kind):
         best, best_d = None, float('inf')
@@ -119,32 +137,83 @@ class NPC:
         if count >= 3:  return 'acquaintance'
         return 'stranger'
 
-    def _record_chat(self, other):
-        self.relationships[other.id] = self.relationships.get(other.id, 0) + 1
-        other.relationships[self.id] = other.relationships.get(self.id, 0) + 1
+    def _record_chat(self, other, tick, phone=False):
+        self.relationships[other.id]  = self.relationships.get(other.id, 0) + 1
+        other.relationships[self.id]  = other.relationships.get(self.id, 0) + 1
+        self.last_chat_tick[other.id]  = tick
+        other.last_chat_tick[self.id]  = tick
+        self.is_phone_chat  = phone
+        other.is_phone_chat = phone
+        # Auto-exchange contacts when friendship threshold first crossed
+        if (self.relationships[other.id] >= FRIEND_THRESHOLD
+                and other.id not in self.phone_contacts):
+            self.phone_contacts.add(other.id)
+            other.phone_contacts.add(self.id)
 
-    def _start_chat(self, other):
-        lines = {'stranger': CHAT_STRANGER, 'acquaintance': CHAT_ACQUAINTANCE, 'friend': CHAT_FRIEND}
-        self.state       = 'chat'
-        self.target_npc  = other
-        self.bubble_text = random.choice(lines[self._friendship_level(other.id)])
-        self.bubble_timer = 180
-        self.chat_cooldown = random.randint(300, 600)
-        other.bubble_text  = random.choice(lines[other._friendship_level(self.id)])
+    def _start_chat(self, other, tick, phone=False):
+        if phone:
+            self.bubble_text  = random.choice(CHAT_PHONE)
+            other.bubble_text = random.choice(CHAT_PHONE)
+            self.chat_cooldown  = random.randint(PHONE_COOLDOWN_MIN, PHONE_COOLDOWN_MAX)
+            other.chat_cooldown = random.randint(PHONE_COOLDOWN_MIN, PHONE_COOLDOWN_MAX)
+        else:
+            lines = {'stranger': CHAT_STRANGER, 'acquaintance': CHAT_ACQUAINTANCE, 'friend': CHAT_FRIEND}
+            self.bubble_text  = random.choice(lines[self._friendship_level(other.id)])
+            other.bubble_text = random.choice(lines[other._friendship_level(self.id)])
+            self.chat_cooldown  = random.randint(300, 600)
+            other.chat_cooldown = random.randint(300, 600)
+        self.state        = 'chat'
+        self.target_npc   = other
+        self.bubble_timer  = 180
         other.bubble_timer = 180
-        other.chat_cooldown = random.randint(300, 600)
-        self._record_chat(other)
+        self._record_chat(other, tick, phone=phone)
 
-    def update(self, items, npcs, px, py):
+    def _apply_decay(self, other_id, tick):
+        last = self.last_chat_tick.get(other_id, 0)
+        if tick - last >= DECAY_INTERVAL:
+            new = max(0, self.relationships.get(other_id, 0) - DECAY_AMOUNT)
+            self.relationships[other_id]  = new
+            self.last_chat_tick[other_id] = tick  # reset so it decays once per interval
+            if new < ACQUAINTANCE_THRESHOLD:
+                self.phone_contacts.discard(other_id)
+
+    def _trigger_conflict(self, other):
+        damage = random.randint(CONFLICT_DAMAGE_MIN, CONFLICT_DAMAGE_MAX)
+        self.relationships[other.id]  = max(0, self.relationships.get(other.id, 0) - damage)
+        other.relationships[self.id]  = max(0, other.relationships.get(self.id, 0) - damage)
+        self.bubble_text   = random.choice(CHAT_CONFLICT)
+        other.bubble_text  = random.choice(CHAT_CONFLICT)
+        self.bubble_timer  = 120
+        other.bubble_timer = 120
+        self.is_phone_chat  = False
+        other.is_phone_chat = False
+        if self.relationships[other.id] < ACQUAINTANCE_THRESHOLD:
+            self.phone_contacts.discard(other.id)
+            other.phone_contacts.discard(self.id)
+
+    def update(self, items, npcs, px, py, tick):
         # Decay needs
         self.hunger = max(0, self.hunger - 0.008)
         self.thirst = max(0, self.thirst - 0.012)
         if self.chat_cooldown > 0:
             self.chat_cooldown -= 1
+        if self.phone_chat_cooldown > 0:
+            self.phone_chat_cooldown -= 1
         if self.bubble_timer > 0:
             self.bubble_timer -= 1
         else:
             self.bubble_text = ''
+
+        # Decay relationships
+        for other_id in list(self.relationships.keys()):
+            self._apply_decay(other_id, tick)
+
+        # Random conflict
+        if self.relationships and random.random() < CONFLICT_PROB:
+            conflict_id  = random.choice(list(self.relationships.keys()))
+            conflict_npc = next((n for n in npcs if n.id == conflict_id), None)
+            if conflict_npc:
+                self._trigger_conflict(conflict_npc)
 
         # State transitions (priority order)
         if self.state != 'chat':
@@ -155,6 +224,16 @@ class NPC:
             elif self.has_food and math.hypot(self.x - px, self.y - py) < 60:
                 self.state = 'give_food'
             elif self.chat_cooldown == 0:
+                # Pass 0: phone chat with a contact (no proximity needed)
+                if self.phone_contacts and self.phone_chat_cooldown == 0:
+                    contact_id  = random.choice(list(self.phone_contacts))
+                    contact_npc = next((n for n in npcs if n.id == contact_id
+                                        and n.chat_cooldown == 0
+                                        and n.phone_chat_cooldown == 0), None)
+                    if contact_npc:
+                        self._start_chat(contact_npc, tick, phone=True)
+                        self.phone_chat_cooldown        = random.randint(PHONE_COOLDOWN_MIN, PHONE_COOLDOWN_MAX)
+                        contact_npc.phone_chat_cooldown = random.randint(PHONE_COOLDOWN_MIN, PHONE_COOLDOWN_MAX)
                 # Pass 1: seek a friend within 120px
                 best_friend, best_d = None, float('inf')
                 for other in npcs:
@@ -169,7 +248,7 @@ class NPC:
                     # Pass 2: original proximity chat
                     for other in npcs:
                         if other is not self and math.hypot(self.x - other.x, self.y - other.y) < 50:
-                            self._start_chat(other)
+                            self._start_chat(other, tick)
                             break
                     else:
                         if self.state not in ('seek_food', 'seek_water', 'give_food'):
@@ -237,7 +316,7 @@ class NPC:
             else:
                 d = math.hypot(self.x - self.target_npc.x, self.y - self.target_npc.y)
                 if d < 22:
-                    self._start_chat(self.target_npc)
+                    self._start_chat(self.target_npc, tick)
                 elif d > 200:
                     self.state = 'wander'
                     self.target_npc = None
@@ -301,10 +380,12 @@ class NPC:
             by = int(self.y) - 72
             pygame.draw.rect(surface, (255, 255, 255), (bx, by, bw, bh), border_radius=5)
             pygame.draw.rect(surface, (180, 180, 180), (bx, by, bw, bh), 1, border_radius=5)
-            # Tail triangle
-            tail_x = int(self.x)
-            pygame.draw.polygon(surface, (255, 255, 255),
-                                 [(tail_x - 4, by + bh), (tail_x + 4, by + bh), (tail_x, by + bh + 6)])
+            if self.is_phone_chat:
+                draw_phone_icon(surface, bx + bw + 6, by + bh // 2)
+            else:
+                tail_x = int(self.x)
+                pygame.draw.polygon(surface, (255, 255, 255),
+                                     [(tail_x - 4, by + bh), (tail_x + 4, by + bh), (tail_x, by + bh + 6)])
             surface.blit(txt_surf, (bx + 5, by + 3))
 
 
@@ -352,6 +433,20 @@ def night_overlay_alpha(t):
 
 
 # ── 绘制函数 ──────────────────────────────────────────
+def draw_phone_icon(surface, cx, cy):
+    # Body
+    pygame.draw.rect(surface, (30, 30, 30),
+                     (cx - PHONE_ICON_W // 2, cy - PHONE_ICON_H // 2,
+                      PHONE_ICON_W, PHONE_ICON_H), border_radius=2)
+    # Screen
+    pygame.draw.rect(surface, (100, 200, 255),
+                     (cx - PHONE_ICON_W // 2 + 1, cy - PHONE_ICON_H // 2 + 2,
+                      PHONE_ICON_W - 2, PHONE_ICON_H - 5))
+    # Home button
+    pygame.draw.circle(surface, (80, 80, 80),
+                       (cx, cy + PHONE_ICON_H // 2 - 2), 1)
+
+
 def draw_block(surface, x, y, color_base=(80, 80, 80)):
     c1 = color_base
     c2 = tuple(min(255, v + 40) for v in c1)
@@ -505,7 +600,7 @@ while running:
 
     # NPC 更新
     for npc in npcs:
-        result = npc.update(items, npcs, player_x, player_y)
+        result = npc.update(items, npcs, player_x, player_y, game_tick)
         if result == 'give_food':
             player_hunger = min(100, player_hunger + 25)
             messages.append(("NPC 给了你食物 +25", 90))
