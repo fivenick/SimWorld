@@ -11,6 +11,12 @@ from constants import (
 )
 
 
+# 主干道中心坐标（与 main.py 中 ROADS 的 'main' 道路一致）
+MAIN_ROAD_H = [400, 900, 1500, 2100, 2600]   # 横向主干道 y 坐标
+MAIN_ROAD_V = [400, 900, 1500, 2100, 2600]   # 纵向主干道 x 坐标
+MAIN_ROAD_CAR_HALF = 8  # 车行道半宽（不含人行道）
+
+
 class NPC:
     def __init__(self, npc_id, x, y):
         self.id    = npc_id
@@ -35,7 +41,7 @@ class NPC:
 
         self.chat_cooldown       = 0
         self.phone_chat_cooldown = 0
-        self.speed = 1.0
+        self.speed = 0.4
         self.dx = 0.0
         self.dy = 0.0
 
@@ -113,6 +119,17 @@ class NPC:
             other.phone_contacts.discard(self.id)
 
     # ── 每帧更新 ──────────────────────────────────────
+
+    def _avoid_main_roads(self):
+        """把 NPC 推出主干道车行道"""
+        for ry in MAIN_ROAD_H:
+            if abs(self.y - ry) < MAIN_ROAD_CAR_HALF:
+                self.y = ry + (MAIN_ROAD_CAR_HALF if self.y >= ry else -MAIN_ROAD_CAR_HALF)
+                self.dy = -self.dy
+        for rx in MAIN_ROAD_V:
+            if abs(self.x - rx) < MAIN_ROAD_CAR_HALF:
+                self.x = rx + (MAIN_ROAD_CAR_HALF if self.x >= rx else -MAIN_ROAD_CAR_HALF)
+                self.dx = -self.dx
 
     def update(self, npcs, tick):
         self.hunger = max(0, self.hunger - 0.004)
@@ -196,3 +213,4 @@ class NPC:
 
         self.x = max(10, min(self.x, WORLD_WIDTH  - 10))
         self.y = max(10, min(self.y, WORLD_HEIGHT - 10))
+        self._avoid_main_roads()

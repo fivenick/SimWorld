@@ -42,8 +42,11 @@ def draw_minimap(surface, npcs, buildings, camera, world_w, world_h):
     pygame.draw.rect(surface, (80, 120, 80), (mm_x, mm_y, mm_w, mm_h), 1)
 
     for kind, bx, by, bw, bh, *_ in buildings:
-        color = (160, 100, 60) if kind == 'house' else \
-                (80, 160, 80)  if kind == 'shop'  else (100, 120, 180)
+        color = (160, 100, 60)  if kind == 'house'   else \
+                (80,  160, 80)  if kind == 'shop'    else \
+                (100, 120, 180) if kind == 'company' else \
+                (220, 200, 80)  if kind == 'school'  else \
+                (180, 80,  200)
         rx = mm_x + int(bx * scale_x)
         ry = mm_y + int(by * scale_y)
         pygame.draw.rect(surface, color, (rx, ry, max(2, int(bw * scale_x)), max(2, int(bh * scale_y))))
